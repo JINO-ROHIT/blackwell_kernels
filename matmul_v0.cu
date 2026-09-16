@@ -4,6 +4,8 @@
 
 #include "utils.h"
 
+namespace {
+
 constexpr int WARP_SIZE = 32;
 
 constexpr int NUM_WARPS = 4;
@@ -49,29 +51,21 @@ void init_tmap_2d_simple(
   );
 }
 
-template <int BLOCK_N, int BLOCK_K, bool TMAP_3D>
 __global__
 __launch_bounds__(TB_SIZE)
-void matmul_v1_kernel(
+void matmul_v0_kernel(
   const __grid_constant__ CUtensorMap A_tmap,
   const __grid_constant__ CUtensorMap B_tmap,
   nv_bfloat16 *C_ptr,
   int M, int N, int K
 ) {
   const int tid = threadIdx.x;
-  const int bid = blockIdx.x;
 
   const int warp_id = tid / WARP_SIZE;
-  const int lane_id = tid % WARP_SIZE;
 
-  // in 1d grid
-  // const int grid_m = M / BLOCK_M;
-  // const int grid_n = N / BLOCK_N;
-  // const int bid_m = bid / grid_n;
-  // const int bid_n = bid % grid_n;
-
-  const int bid_m = blockIdx.y; // Tile row.
-  const int bid_n = blockIdx.x; // Tile column.
+  // v0 uses a 2D output-tile grid.
+  const int bid_m = blockIdx.y;
+  const int bid_n = blockIdx.x;
 
   const int off_m = bid_m * BLOCK_M;
   const int off_n = bid_n * BLOCK_N;
@@ -245,7 +239,6 @@ void matmul_v1_kernel(
 }
 
 
-template <int BLOCK_N, int BLOCK_K, bool TMAP_3D>
 void matmul(
     const nv_bfloat16 *A_ptr,
     const nv_bfloat16 *B_ptr,
@@ -257,17 +250,18 @@ void matmul(
     init_tmap_2d_simple(&A_tmap, A_ptr, M, K, BLOCK_M, 8, CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE); // you can increase the 8 btw in the tensor map
     init_tmap_2d_simple(&B_tmap, B_ptr, N, K, BLOCK_N, 8, CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE);
 
-    // int grid = (M / BLOCK_M) * (N / BLOCK_N); // we are launching a 1d grid
     dim3 grid(N / BLOCK_N, M / BLOCK_M);
     int size_AB = (BLOCK_M + BLOCK_N) * BLOCK_K; // total bf16 elements you need in smem for one A tile and one B tile
     int smem_size = size_AB * sizeof(nv_bfloat16);
 
-    auto this_kernel = matmul_v1_kernel<BLOCK_N, BLOCK_K, TMAP_3D>;
+    auto this_kernel = matmul_v0_kernel;
     if (smem_size > 48'000)
     cudaFuncSetAttribute(this_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 
     this_kernel<<<grid, TB_SIZE, smem_size, stream>>>(A_tmap, B_tmap, C_ptr, M, N, K);
 }
+
+}  // namespace
 
 #include <ATen/ATen.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -290,7 +284,7 @@ at::Tensor matmul_v0(const at::Tensor& A, const at::Tensor& B) {
                 "v0 requires positive M a multiple of 128 and N/K multiples of 256");
     const c10::cuda::CUDAGuard guard(A.device());
     auto C = at::empty({M, N}, A.options());
-    matmul<BLOCK_N, BLOCK_K, false>(
+    matmul(
         reinterpret_cast<const nv_bfloat16*>(A.data_ptr<at::BFloat16>()),
         reinterpret_cast<const nv_bfloat16*>(B.data_ptr<at::BFloat16>()),
         reinterpret_cast<nv_bfloat16*>(C.data_ptr<at::BFloat16>()),
