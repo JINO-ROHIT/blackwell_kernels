@@ -48,3 +48,21 @@ later we use this instruction to do the copy
 ```
 
 more inline comments within the kernel itself.
+
+
+
+whats a core matrix?
+
+a core matrix is the small matrix fragment that one tensor core MMA operation naturally consumes or produces. it is often described as 8 rows × 16 bytes.
+
+it is not necessarily 8 × 16 elements because 16B means 16 bytes, and the number of elements depends on the datatype -
+
+- FP16 / BF16: 16B = 8 elements
+- FP8: 16B = 16 elements
+- FP32: 16B = 4 elements
+
+So if your data is FP16, an 8 × 16B core matrix is:
+
+8 rows × 8 FP16 values = 8 × 8 elements
+
+This is the smallest shared-memory tile/fragment the tcgen05.mma layout is describing. Larger matrices are built by repeating these core fragments across the M and K/N dimensions.
